@@ -182,7 +182,7 @@ pub const LibraryManager = struct {
     }
 
     fn installLibrary(self: *Self, library_type: LibraryType) !void {
-        const config = library_configs.get(@tagName(library_type)).?;
+        const config = getLibraryConfig(@tagName(library_type)).?;
 
         // Detect package manager
         const package_manager = try self.detectPackageManager();
@@ -292,7 +292,7 @@ pub const LibraryManager = struct {
 };
 
 // Global library manager instance
-var global_library_manager: ?LibraryManager = null;
+var global_library_manager: ?*LibraryManager = null;
 var library_manager_mutex = std.Thread.Mutex{};
 
 pub fn getLibraryManager(allocator: std.mem.Allocator) *LibraryManager {

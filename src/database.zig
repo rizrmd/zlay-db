@@ -32,12 +32,22 @@ pub const ConnectionConfig = struct {
         // Validate that either connection_string OR required fields are provided
         if (self.connection_string == null) {
             switch (self.database_type) {
-                .postgresql, .mysql, .sqlserver, .oracle, .clickhouse => {
+                .postgresql => {
                     if (self.host == null or self.database == null or self.username == null) {
                         return errors.DatabaseError.InvalidConfiguration;
                     }
                 },
-                .sqlite, .excel, .csv => {
+                .sqlite => {
+                    if (self.file_path == null) {
+                        return errors.DatabaseError.InvalidConfiguration;
+                    }
+                },
+                .mysql, .sqlserver, .oracle, .clickhouse => {
+                    if (self.host == null or self.database == null or self.username == null) {
+                        return errors.DatabaseError.InvalidConfiguration;
+                    }
+                },
+                .excel, .csv => {
                     if (self.file_path == null) {
                         return errors.DatabaseError.InvalidConfiguration;
                     }
@@ -59,14 +69,24 @@ pub const PoolConfig = struct {
     pub fn defaultForDatabase(db_type: types.DatabaseType) PoolConfig {
         return switch (db_type) {
             // Databases that benefit from pooling
-            .postgresql, .mysql, .sqlserver, .oracle, .clickhouse => .{
+            .postgresql => .{
                 .enabled = true,
                 .size = 10,
                 .max_connections = 100,
             },
 
             // Databases where pooling is not applicable
-            .sqlite, .excel, .csv => .{
+            .sqlite => .{
+                .enabled = false, // Noop pooling
+                .size = 1,
+                .max_connections = 1,
+            },
+            .mysql, .sqlserver, .oracle, .clickhouse => .{
+                .enabled = true,
+                .size = 10,
+                .max_connections = 100,
+            },
+            .excel, .csv => .{
                 .enabled = false, // Noop pooling
                 .size = 1,
                 .max_connections = 1,
@@ -154,12 +174,12 @@ fn convertSingleValue(value: anytype) types.Value {
     const value_type = @typeInfo(@TypeOf(value));
 
     return switch (value_type) {
-        .Int => .{ .integer = @intCast(value) },
-        .Float => .{ .float = @floatCast(value) },
-        .Bool => .{ .boolean = value },
-        .Optional => if (value) |inner| convertSingleValue(inner) else .null,
+        .int => .{ .integer = @intCast(value) },
+        .float => .{ .float = @floatCast(value) },
+        .bool => .{ .boolean = value },
+        .optional => if (value) |inner| convertSingleValue(inner) else .null,
         .pointer => |ptr_info| {
-            if (ptr_info.size == .Slice and ptr_info.child == u8) {
+            if (@intFromEnum(ptr_info.size) == 2 and ptr_info.child == u8) {
                 return .{ .text = value };
             }
             return .null;
@@ -318,26 +338,26 @@ pub const Database = struct {
                 const postgresql = @import("drivers/postgresql.zig");
                 return postgresql.createDriver(allocator);
             },
-            .mysql => {
-                const mysql = @import("drivers/mysql.zig");
-                return mysql.createDriver(allocator);
-            },
-            .sqlserver => {
-                const sqlserver = @import("drivers/sqlserver.zig");
-                return sqlserver.createDriver(allocator);
-            },
-            .oracle => {
-                const oracle = @import("drivers/oracle.zig");
-                return oracle.createDriver(allocator);
-            },
-            .csv => {
-                const csv = @import("drivers/csv.zig");
-                return csv.createDriver(allocator);
-            },
-            .excel => {
-                const excel = @import("drivers/excel.zig");
-                return excel.createDriver(allocator);
-            },
+            // .mysql => {
+            //     const mysql = @import("drivers/mysql.zig");
+            //     return mysql.createDriver(allocator);
+            // },
+            // .sqlserver => {
+            //     const sqlserver = @import("drivers/sqlserver.zig");
+            //     return sqlserver.createDriver(allocator);
+            // },
+            // .oracle => {
+            //     const oracle = @import("drivers/oracle.zig");
+            //     return oracle.createDriver(allocator);
+            // },
+            // .csv => {
+            //     const csv = @import("drivers/csv.zig");
+            //     return csv.createDriver(allocator);
+            // },
+            // .excel => {
+            //     const excel = @import("drivers/excel.zig");
+            //     return excel.createDriver(allocator);
+            // },
             else => error.NotImplemented,
         };
     }

@@ -139,7 +139,7 @@ pub const PostgreSQLDriver = struct {
                 std.debug.print("❌ PostgreSQL library not found. Please install libpq development package.\n", .{});
                 return errors.DatabaseError.LibraryNotFound;
             },
-            else => return err,
+            else => return errors.DatabaseError.LibraryNotFound,
         };
 
         const host = config.host orelse "localhost";
@@ -191,9 +191,9 @@ pub const PostgreSQLDriver = struct {
         if (self.conn == null) return errors.DatabaseError.InvalidConnection;
 
         if (args.len > 0) {
-            return self.executeParamUpdate(sql, args);
+            return self.executeParamUpdate(sql, args) catch return errors.DatabaseError.QueryFailed;
         } else {
-            return self.executeSimpleUpdate(sql);
+            return self.executeSimpleUpdate(sql) catch return errors.DatabaseError.QueryFailed;
         }
     }
 
@@ -201,10 +201,10 @@ pub const PostgreSQLDriver = struct {
         if (self.conn == null) return errors.DatabaseError.InvalidConnection;
 
         const result = PQexec(self.conn.?, "BEGIN");
-        defer PQclear(result);
+        defer if (result) |res| PQclear(res);
 
-        if (result == null or PQresultStatus(result) != PGRES_COMMAND_OK) {
-            const error_msg = if (result) |res| PQresultErrorMessage(res) else "Unknown error";
+        if (result == null or PQresultStatus(result.?) != PGRES_COMMAND_OK) {
+            const error_msg = if (result) |res| PQresultErrorMessage(res) else @as([*c]const u8, "Unknown error");
             std.debug.print("PostgreSQL begin transaction error: {s}\n", .{error_msg});
             return errors.DatabaseError.TransactionFailed;
         }
@@ -273,8 +273,10 @@ pub const PostgreSQLDriver = struct {
     }
 
     fn executeSimpleQuery(self: *Self, sql: []const u8) !types.ResultSet {
-        const sql_cstr = try std.cstr.addNullByte(self.allocator, sql);
+        const sql_cstr = try self.allocator.alloc(u8, sql.len + 1);
         defer self.allocator.free(sql_cstr);
+        @memcpy(sql_cstr[0..sql.len], sql);
+        sql_cstr[sql.len] = 0;
 
         const result = PQexec(self.conn.?, sql_cstr.ptr) orelse return errors.DatabaseError.QueryFailed;
         defer PQclear(result);
@@ -290,8 +292,10 @@ pub const PostgreSQLDriver = struct {
     }
 
     fn executeParamQuery(self: *Self, sql: []const u8, args: []const types.Value) !types.ResultSet {
-        const sql_cstr = try std.cstr.addNullByte(self.allocator, sql);
+        const sql_cstr = try self.allocator.alloc(u8, sql.len + 1);
         defer self.allocator.free(sql_cstr);
+        @memcpy(sql_cstr[0..sql.len], sql);
+        sql_cstr[sql.len] = 0;
 
         // Convert parameters to C strings
         var param_values = try self.allocator.alloc([*c]const u8, args.len);
@@ -383,8 +387,10 @@ pub const PostgreSQLDriver = struct {
     }
 
     fn executeSimpleUpdate(self: *Self, sql: []const u8) !u64 {
-        const sql_cstr = try std.cstr.addNullByte(self.allocator, sql);
+        const sql_cstr = try self.allocator.alloc(u8, sql.len + 1);
         defer self.allocator.free(sql_cstr);
+        @memcpy(sql_cstr[0..sql.len], sql);
+        sql_cstr[sql.len] = 0;
 
         const result = PQexec(self.conn.?, sql_cstr.ptr) orelse return errors.DatabaseError.QueryFailed;
         defer PQclear(result);
@@ -413,8 +419,9 @@ pub const PostgreSQLDriver = struct {
     }
 
     fn formatSqlWithParams(self: *Self, sql: []const u8, args: []const types.Value) ![]u8 {
-        var result = std.ArrayList(u8).init(self.allocator);
-        errdefer result.deinit();
+        var buffer: [1024]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&buffer);
+        const writer = fbs.writer();
 
         var param_index: usize = 0;
         var i: usize = 0;
@@ -425,44 +432,44 @@ pub const PostgreSQLDriver = struct {
                     return errors.DatabaseError.QueryFailed;
                 }
 
-                try self.appendValue(&result, args[param_index]);
+                try self.appendValue(writer, args[param_index]);
                 param_index += 1;
                 i += 2; // Skip $ and digit
             } else {
-                try result.append(sql[i]);
+                try writer.writeByte(sql[i]);
                 i += 1;
             }
         }
 
-        return result.toOwnedSlice();
+        return self.allocator.dupe(u8, fbs.getWritten());
     }
 
-    fn appendValue(_: *Self, result: *std.ArrayList(u8), value: types.Value) !void {
+    fn appendValue(_: *Self, writer: anytype, value: types.Value) !void {
         switch (value) {
-            .null => try result.appendSlice("NULL"),
-            .boolean => |b| try result.appendSlice(if (b) "TRUE" else "FALSE"),
-            .integer => |i| try std.fmt.format(result.writer(), "{}", .{i}),
-            .float => |f| try std.fmt.format(result.writer(), "{}", .{f}),
+            .null => try writer.writeAll("NULL"),
+            .boolean => |b| try writer.writeAll(if (b) "TRUE" else "FALSE"),
+            .integer => |i| try writer.print("{}", .{i}),
+            .float => |f| try writer.print("{}", .{f}),
             .text => |t| {
-                try result.append('\'');
+                try writer.writeByte('\'');
                 for (t) |char| {
                     if (char == '\'') {
-                        try result.appendSlice("''");
+                        try writer.writeAll("''");
                     } else {
-                        try result.append(char);
+                        try writer.writeByte(char);
                     }
                 }
-                try result.append('\'');
+                try writer.writeByte('\'');
             },
-            .date => |d| try std.fmt.format(result.writer(), "'{}'", .{d}),
-            .time => |t| try std.fmt.format(result.writer(), "'{}'", .{t}),
-            .timestamp => |ts| try std.fmt.format(result.writer(), "'{}'", .{ts}),
+            .date => |d| try writer.print("'{}'", .{d}),
+            .time => |t| try writer.print("'{}'", .{t}),
+            .timestamp => |ts| try writer.print("'{}'", .{ts}),
             .binary => |b| {
-                try result.appendSlice("E'\\\\x");
+                try writer.writeAll("E'\\\\x");
                 for (b) |byte| {
-                    try std.fmt.format(result.writer(), "{x:0>2}", .{byte});
+                    try writer.print("{x:0>2}", .{byte});
                 }
-                try result.append('\'');
+                try writer.writeByte('\'');
             },
         }
     }
@@ -475,7 +482,7 @@ pub const PostgreSQLDriver = struct {
         var columns = try self.allocator.alloc(types.Column, @intCast(field_count));
         errdefer self.allocator.free(columns);
 
-        for (0..field_count) |i| {
+        for (0..@as(usize, @intCast(field_count))) |i| {
             const name_cstr = PQfname(result, @intCast(i));
             const name = try self.allocator.dupe(u8, std.mem.sliceTo(name_cstr, 0));
 
@@ -493,11 +500,11 @@ pub const PostgreSQLDriver = struct {
         var rows = try self.allocator.alloc(types.Row, @intCast(tuple_count));
         errdefer self.allocator.free(rows);
 
-        for (0..tuple_count) |row_idx| {
+        for (0..@as(usize, @intCast(tuple_count))) |row_idx| {
             var values = try self.allocator.alloc(types.Value, @intCast(field_count));
             errdefer self.allocator.free(values);
 
-            for (0..field_count) |col_idx| {
+            for (0..@as(usize, @intCast(field_count))) |col_idx| {
                 const is_null = PQgetisnull(result, @intCast(row_idx), @intCast(col_idx));
                 if (is_null != 0) {
                     values[col_idx] = .null;
