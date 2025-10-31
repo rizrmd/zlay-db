@@ -307,6 +307,11 @@ pub const PostgreSQLDriver = struct {
         var param_formats = try self.allocator.alloc(c_int, args.len);
         defer self.allocator.free(param_formats);
 
+        // Keep track of allocations for text parameters
+        var allocations: [10][]u8 = undefined;
+        var alloc_count: usize = 0;
+        defer for (0..alloc_count) |j| self.allocator.free(allocations[j]);
+
         for (args, 0..) |arg, i| {
             switch (arg) {
                 .null => {
@@ -316,41 +321,59 @@ pub const PostgreSQLDriver = struct {
                 },
                 .boolean => |b| {
                     const text = try std.fmt.allocPrint(self.allocator, "{}", .{b});
+                    allocations[alloc_count] = text;
+                    alloc_count += 1;
                     param_values[i] = text.ptr;
                     param_lengths[i] = @intCast(text.len);
                     param_formats[i] = 0;
                 },
                 .integer => |int_val| {
                     const text = try std.fmt.allocPrint(self.allocator, "{}", .{int_val});
+                    allocations[alloc_count] = text;
+                    alloc_count += 1;
                     param_values[i] = text.ptr;
                     param_lengths[i] = @intCast(text.len);
                     param_formats[i] = 0;
                 },
                 .float => |float_val| {
                     const text = try std.fmt.allocPrint(self.allocator, "{}", .{float_val});
+                    allocations[alloc_count] = text;
+                    alloc_count += 1;
                     param_values[i] = text.ptr;
                     param_lengths[i] = @intCast(text.len);
                     param_formats[i] = 0;
                 },
                 .text => |text_val| {
-                    param_values[i] = text_val.ptr;
+                    // Allocate null-terminated string for text format
+                    const null_term = try self.allocator.alloc(u8, text_val.len + 1);
+                    @memcpy(null_term[0..text_val.len], text_val);
+                    null_term[text_val.len] = 0;
+                    allocations[alloc_count] = null_term;
+                    alloc_count += 1;
+                    param_values[i] = null_term.ptr;
                     param_lengths[i] = @intCast(text_val.len);
                     param_formats[i] = 0;
                 },
                 .date => |date_val| {
                     const text = try std.fmt.allocPrint(self.allocator, "{}", .{date_val});
+                    allocations[alloc_count] = text;
+                    alloc_count += 1;
                     param_values[i] = text.ptr;
                     param_lengths[i] = @intCast(text.len);
                     param_formats[i] = 0;
                 },
                 .time => |time_val| {
                     const text = try std.fmt.allocPrint(self.allocator, "{}", .{time_val});
+                    allocations[alloc_count] = text;
+                    alloc_count += 1;
                     param_values[i] = text.ptr;
                     param_lengths[i] = @intCast(text.len);
                     param_formats[i] = 0;
                 },
                 .timestamp => |ts_val| {
                     const text = try std.fmt.allocPrint(self.allocator, "{}", .{ts_val});
+                    allocations[alloc_count] = text;
+                    alloc_count += 1;
                     param_values[i] = text.ptr;
                     param_lengths[i] = @intCast(text.len);
                     param_formats[i] = 0;
